@@ -44,6 +44,14 @@ pub enum Warning {
         role: String,
         largest: u32,
     },
+    /// A ready-made source's larger sizes were synthesized by upscaling its
+    /// largest embedded image (role's `upscale: true`), rather than left for
+    /// Windows to stretch on the fly.
+    ReadyMadeUpscaled {
+        role: String,
+        native: u32,
+        added: Vec<u32>,
+    },
     /// Sizes were left out of an animated cursor to stay under the Windows
     /// per-frame limit. See [`crate::ani::MAX_FRAME_BYTES`].
     AnimationSizesDropped {
@@ -78,8 +86,17 @@ impl std::fmt::Display for Warning {
                 f,
                 "{role} uses a ready-made cursor file whose largest image is {largest}px. \
                  It is copied through untouched, but Windows must scale it up on high-DPI \
-                 screens or at large pointer sizes. Only redrawing it from vector or \
-                 high-resolution art can fix that."
+                 screens or at large pointer sizes. Set \"upscale\": true on this role in \
+                 pack.json to resample it up yourself instead — still soft above {largest}px \
+                 since no upscale invents real detail, but sharper and more consistent than \
+                 whatever Windows does on the fly. Only redrawing it from vector or \
+                 high-resolution art gets a genuinely sharp result."
+            ),
+            Warning::ReadyMadeUpscaled { role, native, added } => write!(
+                f,
+                "{role} is a ready-made cursor only {native}px native; {added:?} px were \
+                 synthesized by upscaling it. They will look softer than a size drawn from \
+                 real art at that resolution."
             ),
             Warning::AnimationSizesDropped {
                 role,

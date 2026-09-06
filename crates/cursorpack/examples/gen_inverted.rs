@@ -270,8 +270,9 @@ fn main() {
     }
 }
 
-/// Draw the app icon: the inverted pointer with a bold white plus at the bottom
-/// right, so the mark reads on both light and dark taskbars.
+/// Draw the app icon: the inverted pointer, large and at its natural
+/// proportions, with a bold white plus badge overlapping its bottom-right
+/// corner — the same layout as a typical "add" badge overlaid on an icon.
 ///
 /// Built from the same inverted art as the pack, rather than hand-drawn, so the
 /// icon and the cursors can never drift apart.
@@ -284,8 +285,8 @@ fn write_icon(src: &Path, out: &Path) {
     invert(&mut rgba);
 
     // The Windows artwork sits in a corner of its viewBox with a lot of dead
-    // space, which would leave the icon mostly empty. Crop to the drawn pixels
-    // first, then scale that up.
+    // space. Crop to the drawn pixels, keeping the cursor's real (non-square)
+    // proportions rather than padding it out to a square.
     let src_img = image::RgbaImage::from_raw(N, N, rgba).expect("square buffer");
     let (mut x0, mut y0, mut x1, mut y1) = (N, N, 0u32, 0u32);
     for (x, y, px) in src_img.enumerate_pixels() {
@@ -296,48 +297,44 @@ fn write_icon(src: &Path, out: &Path) {
             y1 = y1.max(y);
         }
     }
-    let side = (x1 - x0 + 1).max(y1 - y0 + 1);
-    let cropped = image::imageops::crop_imm(&src_img, x0, y0, side.min(N - x0), side.min(N - y0))
-        .to_image();
+    let (bw, bh) = (x1 - x0 + 1, y1 - y0 + 1);
+    let cropped = image::imageops::crop_imm(&src_img, x0, y0, bw, bh).to_image();
 
-    // Square it off, then scale to most of the canvas.
-    let mut squared = image::RgbaImage::new(side, side);
-    image::imageops::replace(&mut squared, &cropped, 0, 0);
-    let pointer_px = (N as f32 * 0.66) as u32;
-    let small = raster::resize_rgba(&squared.into_raw(), side, pointer_px).expect("resize");
+    // Scale to fill almost the whole canvas, at the cursor's own aspect ratio.
+    let margin = (N as f32 * 0.05) as u32;
+    let avail = N - 2 * margin;
+    let scale = (avail as f32 / bw as f32).min(avail as f32 / bh as f32);
+    let (cw, ch) = (
+        (bw as f32 * scale).round() as u32,
+        (bh as f32 * scale).round() as u32,
+    );
+    let big = image::imageops::resize(&cropped, cw, ch, image::imageops::FilterType::Lanczos3);
 
     let mut canvas = image::RgbaImage::new(N, N);
-    let inset = (N as f32 * 0.03) as u32;
-    for y in 0..pointer_px {
-        for x in 0..pointer_px {
-            let s = ((y * pointer_px + x) * 4) as usize;
-            if small[s + 3] == 0 {
-                continue;
-            }
-            canvas.put_pixel(
-                x + inset,
-                y + inset,
-                image::Rgba([small[s], small[s + 1], small[s + 2], small[s + 3]]),
-            );
-        }
-    }
+    image::imageops::overlay(&mut canvas, &big, margin as i64, margin as i64);
 
-    // Plus sign: white body inside a dark keyline.
-    let (cx, cy) = (N as f32 * 0.795, N as f32 * 0.795);
+    // Plus badge, overlapping the bottom-right corner of the cursor itself (not
+    // floating off in empty canvas space) — a dark keyline behind a white fill,
+    // so it reads whether it sits over the black cursor or the transparent
+    // background behind it.
+    let outer_half = N as f32 * 0.20;
+    let fit = |v: f32| v.clamp(outer_half + 2.0, N as f32 - outer_half - 2.0);
+    let cx = fit(margin as f32 + cw as f32 * 0.92);
+    let cy = fit(margin as f32 + ch as f32 * 0.92);
     let cross = |x: u32, y: u32, half: f32, thick: f32| {
         let (dx, dy) = ((x as f32 - cx).abs(), (y as f32 - cy).abs());
         (dx <= thick && dy <= half) || (dy <= thick && dx <= half)
     };
     for y in 0..N {
         for x in 0..N {
-            if cross(x, y, N as f32 * 0.185, N as f32 * 0.072) {
+            if cross(x, y, outer_half, N as f32 * 0.078) {
                 canvas.put_pixel(x, y, image::Rgba([0x14, 0x13, 0x1a, 255]));
             }
         }
     }
     for y in 0..N {
         for x in 0..N {
-            if cross(x, y, N as f32 * 0.150, N as f32 * 0.050) {
+            if cross(x, y, N as f32 * 0.160, N as f32 * 0.054) {
                 canvas.put_pixel(x, y, image::Rgba([255, 255, 255, 255]));
             }
         }

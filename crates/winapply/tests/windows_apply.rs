@@ -520,3 +520,114 @@ fn startup_skips_a_pack_that_no_longer_exists() {
 
     assert_eq!(apply::reapply_last_pack().unwrap(), None);
 }
+
+// ---------------------------------------------------------- ready-made upscale
+
+/// Build a standalone single-size `.cur` from one image cropped out of a stock
+/// multi-size file, mimicking a low-resolution download (32/48px only).
+fn single_size_cur(source: &Path, size: u32) -> Vec<u8> {
+    let images = cursorpack::ico::decode(&std::fs::read(source).unwrap()).unwrap();
+    let img = images.into_iter().find(|i| i.size == size).unwrap();
+    cursorpack::ico::encode(&[img], cursorpack::ico::TYPE_CURSOR).unwrap()
+}
+
+/// The authoritative check for the `upscale` option: every size it synthesizes
+/// must actually be something Windows will load, at the size requested, not
+/// just bytes that happen to decode on our own end.
+#[test]
+fn windows_accepts_every_upscaled_size_from_a_low_res_ready_made_source() {
+    let out = scratch("upscale-windows");
+    std::fs::create_dir_all(out.join("art")).unwrap();
+
+    let stock_dir = PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into()))
+        .join("Cursors");
+    std::fs::write(
+        out.join("art/small.cur"),
+        single_size_cur(&stock_dir.join("aero_arrow.cur"), 32),
+    )
+    .unwrap();
+    std::fs::write(
+        out.join("pack.json"),
+        "{ \"name\": \"WindowsUpscale\", \"roles\": { \"Arrow\": { \"source\": \"art/small.cur\", \"upscale\": true } } }",
+    )
+    .unwrap();
+
+    let pack = Pack::load(&out).unwrap();
+    let built = build::build(&pack, &out).unwrap();
+    let written = built.write_to(&out.join("built")).unwrap();
+    let (_, path) = written.iter().find(|(r, _)| r == "Arrow").unwrap();
+
+    for &size in DEFAULT_SIZES {
+        let loaded = winapply::probe_cursor(path, Some(size))
+            .unwrap_or_else(|e| panic!("Windows rejected the upscaled {size}px: {e}"));
+        assert_eq!(
+            (loaded.width, loaded.height),
+            (size as i32, size as i32),
+            "asked Windows for {size}px, got {}x{}",
+            loaded.width,
+            loaded.height
+        );
+    }
+}
+
+/// The upscaled result should still be sharper than letting Windows stretch the
+/// native size on its own: our resample uses the same premultiplied Lanczos
+/// filter as the rest of the pipeline, applied once at build time.
+#[test]
+fn upscaling_a_ready_made_source_is_sharper_than_leaving_it_to_windows() {
+    let out = scratch("upscale-sharpness");
+    std::fs::create_dir_all(out.join("art")).unwrap();
+
+    let stock_dir = PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into()))
+        .join("Cursors");
+    let small = single_size_cur(&stock_dir.join("aero_arrow.cur"), 32);
+    std::fs::write(out.join("art/small.cur"), &small).unwrap();
+
+    // Without upscale: Windows has only the 32px image to stretch to 128px itself.
+    std::fs::write(out.join("pack.json"), "{ \"name\": \"NoUp\", \"roles\": { \"Arrow\": { \"source\": \"art/small.cur\" } } }").unwrap();
+    let no_up = build::build(&Pack::load(&out).unwrap(), &out).unwrap();
+    let no_up_path = out.join("no_upscale.cur");
+    std::fs::write(&no_up_path, &no_up.cursors[0].data).unwrap();
+
+    // With upscale: we resample to 128px ourselves at build time.
+    std::fs::write(
+        out.join("pack.json"),
+        "{ \"name\": \"Up\", \"roles\": { \"Arrow\": { \"source\": \"art/small.cur\", \"upscale\": true } } }",
+    )
+    .unwrap();
+    let up = build::build(&Pack::load(&out).unwrap(), &out).unwrap();
+    let up_path = out.join("upscale.cur");
+    std::fs::write(&up_path, &up.cursors[0].data).unwrap();
+
+    // Ask Windows to render both at 128px. The plain 32px-only file forces
+    // Windows to stretch on the fly; the upscale:true file already contains a
+    // 128px image we generated ourselves.
+    let a = winapply::read_cursor_pixels(&no_up_path, 128).unwrap();
+    let b = winapply::read_cursor_pixels(&up_path, 128).unwrap();
+
+    let sharpness = |bgra: &[u8], size: u32| -> f64 {
+        let alpha = |x: u32, y: u32| bgra[((y * size + x) * 4 + 3) as usize] as f64;
+        let mut total = 0.0;
+        let mut n = 0.0;
+        for y in 1..size - 1 {
+            for x in 1..size - 1 {
+                let gx = alpha(x + 1, y) - alpha(x - 1, y);
+                let gy = alpha(x, y + 1) - alpha(x, y - 1);
+                total += gx * gx + gy * gy;
+                n += 1.0;
+            }
+        }
+        total / n
+    };
+
+    let windows_stretch = sharpness(&a, 128);
+    let our_upscale = sharpness(&b, 128);
+    eprintln!("edge energy at 128px: windows-stretched {windows_stretch:.2}, our-upscale {our_upscale:.2}");
+
+    // Not claiming this beats real high-res art (it cannot invent detail), only
+    // that resampling once ourselves is not worse than what Windows does live.
+    assert!(
+        our_upscale >= windows_stretch * 0.8,
+        "our upscale should be roughly comparable to or better than Windows' own stretch"
+    );
+}

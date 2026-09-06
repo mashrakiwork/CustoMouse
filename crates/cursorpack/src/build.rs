@@ -151,7 +151,7 @@ pub fn is_ready_made(path: &Path) -> bool {
 ///
 /// The file is parsed to prove it is valid and to read back its sizes, then its
 /// original bytes are written out unchanged — unless the manifest overrides the
-/// hotspot, in which case it is re-encoded with the new one.
+/// hotspot or turns on `upscale`, either of which needs the file re-encoded.
 fn build_ready_made(
     pack: &Pack,
     role: &str,
@@ -165,7 +165,7 @@ fn build_ready_made(
     // cursors are often 1/4/8bpp paletted, which we deliberately do not decode —
     // but Windows loads them fine, and copying them through needs no decoding at
     // all. Insisting on a full decode here would reject perfectly good files.
-    let (animated, frames, sizes) = match ani::parse(&data) {
+    let (animated, frame_count, sizes) = match ani::parse(&data) {
         Ok(raw) => {
             let sizes = frame_sizes(raw.frames.first().map(|f| f.as_slice()).unwrap_or(&[]));
             (true, raw.frames.len(), sizes)
@@ -181,39 +181,73 @@ fn build_ready_made(
             (false, 1, sizes)
         }
     };
+    let native = sizes.iter().copied().max().unwrap_or(32);
 
-    // Rewriting the hotspot is the one case that needs real pixels.
-    let out_data = match spec.hotspot {
-        None => data,
-        Some(_) if animated => {
-            let mut anim = ani::decode(&data)?;
-            for frame in &mut anim.frames {
-                for img in frame.iter_mut() {
-                    let (hx, hy) = pack.scaled_hotspot(spec, img.size);
-                    img.hot_x = hx;
-                    img.hot_y = hy;
-                }
-            }
-            ani::encode(&anim)?
-        }
-        Some(_) => {
-            let mut images = ico::decode(&data)?;
-            for img in &mut images {
-                let (hx, hy) = pack.scaled_hotspot(spec, img.size);
-                img.hot_x = hx;
-                img.hot_y = hy;
-            }
-            ico::encode(&images, ico::TYPE_CURSOR)?
-        }
-    };
+    // A plain pass-through needs no decoding at all. Overriding the hotspot or
+    // synthesizing larger sizes both need real pixels to work with.
+    let needs_decode = spec.hotspot.is_some() || spec.upscale;
 
-    if let Some(&largest) = sizes.iter().max() {
-        if largest < 64 {
-            warnings.push(Warning::LowResolutionSource {
+    let (out_data, final_sizes) = if !needs_decode {
+        (data, sizes.clone())
+    } else if animated {
+        let mut anim = ani::decode(&data)?;
+
+        // Folding in the pack's larger sizes is capped to what a single frame
+        // may hold — the same budget drawn animations respect. Without
+        // `upscale` the original sizes are kept exactly as they came, since a
+        // real ready-made file was already something Windows could load.
+        let mut wanted = sizes.clone();
+        if spec.upscale {
+            wanted.extend(pack.sizes.iter().copied());
+            wanted.sort_unstable();
+            wanted.dedup();
+        }
+        let (kept, dropped) = ani::fit_sizes(&wanted);
+        if spec.upscale && !dropped.is_empty() {
+            warnings.push(Warning::AnimationSizesDropped {
                 role: role.to_string(),
-                largest,
+                kept: kept.clone(),
+                dropped,
             });
         }
+
+        for frame in &mut anim.frames {
+            let existing = std::mem::take(frame);
+            *frame = build_sized_frame(pack, spec, existing, &kept)?;
+        }
+
+        (ani::encode(&anim)?, kept)
+    } else {
+        let existing = ico::decode(&data)?;
+        let mut wanted = sizes.clone();
+        if spec.upscale {
+            wanted.extend(pack.sizes.iter().copied());
+            wanted.sort_unstable();
+            wanted.dedup();
+        }
+        let images = build_sized_frame(pack, spec, existing, &wanted)?;
+        (ico::encode(&images, ico::TYPE_CURSOR)?, wanted)
+    };
+
+    // Report what actually happened: sizes synthesized by upscaling, or (if
+    // upscaling was off, or on but added nothing — e.g. the animation budget
+    // left no room) that the source is still stuck at its native resolution.
+    let added: Vec<u32> = final_sizes
+        .iter()
+        .copied()
+        .filter(|s| !sizes.contains(s))
+        .collect();
+    if spec.upscale && !added.is_empty() {
+        warnings.push(Warning::ReadyMadeUpscaled {
+            role: role.to_string(),
+            native,
+            added,
+        });
+    } else if native < 64 {
+        warnings.push(Warning::LowResolutionSource {
+            role: role.to_string(),
+            largest: native,
+        });
     }
 
     let ext = if animated { "ani" } else { "cur" };
@@ -223,8 +257,8 @@ fn build_ready_made(
             file_name: format!("{role}.{ext}"),
             data: out_data,
             animated,
-            frames,
-            sizes,
+            frames: frame_count,
+            sizes: final_sizes,
         },
         warnings,
     ))
@@ -238,6 +272,65 @@ fn frame_sizes(data: &[u8]) -> Vec<u32> {
     sizes.sort_unstable();
     sizes.dedup();
     sizes
+}
+
+/// Scale a hotspot recorded at `from_size` to `to_size` by simple proportion,
+/// clamped inside the target canvas.
+fn scale_hotspot(from_size: u32, hot: (u16, u16), to_size: u32) -> (u16, u16) {
+    let ratio = to_size as f64 / from_size as f64;
+    let x = ((hot.0 as f64 * ratio).round() as u32).min(to_size.saturating_sub(1));
+    let y = ((hot.1 as f64 * ratio).round() as u32).min(to_size.saturating_sub(1));
+    (x as u16, y as u16)
+}
+
+/// Build one frame's image set for `target_sizes` out of a ready-made source's
+/// `existing` images.
+///
+/// A target size already present is kept exactly (pixels untouched); any other
+/// is synthesized by upscaling the largest existing image, which is the best
+/// single source available — resampling once from the highest-resolution
+/// original beats resampling from whichever size happens to be closest.
+///
+/// Hotspot: an explicit override (`spec.hotspot`) is applied uniformly via
+/// `pack.scaled_hotspot`. Otherwise a size that already existed keeps its own
+/// recorded hotspot, and a synthesized size scales the hotspot proportionally
+/// from the largest existing image.
+fn build_sized_frame(
+    pack: &Pack,
+    spec: &RoleSpec,
+    existing: Vec<Image>,
+    target_sizes: &[u32],
+) -> Result<Vec<Image>> {
+    let mut by_size: std::collections::BTreeMap<u32, Image> =
+        existing.into_iter().map(|img| (img.size, img)).collect();
+    let &largest_size = by_size
+        .keys()
+        .max()
+        .ok_or_else(|| Error::malformed("cursor", "frame has no images to build from"))?;
+    let largest_rgba = by_size[&largest_size].rgba.clone();
+    let largest_hot = (by_size[&largest_size].hot_x, by_size[&largest_size].hot_y);
+
+    let mut out = Vec::with_capacity(target_sizes.len());
+    for &size in target_sizes {
+        let img = match by_size.remove(&size) {
+            Some(existing_img) => existing_img,
+            None => {
+                let rgba = crate::raster::resize_rgba(&largest_rgba, largest_size, size)?;
+                let (hx, hy) = scale_hotspot(largest_size, largest_hot, size);
+                Image::new(size, rgba, hx, hy)?
+            }
+        };
+        out.push(img);
+    }
+
+    if spec.hotspot.is_some() {
+        for img in &mut out {
+            let (hx, hy) = pack.scaled_hotspot(spec, img.size);
+            img.hot_x = hx;
+            img.hot_y = hy;
+        }
+    }
+    Ok(out)
 }
 
 fn build_role(

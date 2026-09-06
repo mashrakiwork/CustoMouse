@@ -179,6 +179,21 @@ pub struct RoleSpec {
     /// `"system"` leaves this role at the Windows default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherit: Option<String>,
+
+    /// For a ready-made `.cur`/`.ani` source that only carries small images:
+    /// synthesize the pack's larger sizes by upscaling the largest embedded
+    /// image, instead of leaving Windows to stretch it at display time.
+    ///
+    /// Off by default, so a plain import stays a byte-for-byte copy of the
+    /// source file. The result is still soft above the source's native size —
+    /// upscaling cannot invent detail that was never there — but it resamples
+    /// once with the same high-quality filter the rest of the pipeline uses,
+    /// rather than whatever Windows does on the fly, and it is consistent
+    /// across every monitor and pointer-size setting rather than depending on
+    /// each one separately. Ignored for drawn (SVG/PNG/GIF) sources, which
+    /// already render at every requested size.
+    #[serde(default)]
+    pub upscale: bool,
 }
 
 impl Default for RoleSpec {
@@ -190,6 +205,7 @@ impl Default for RoleSpec {
             looping: true,
             grid: None,
             inherit: None,
+            upscale: false,
         }
     }
 }

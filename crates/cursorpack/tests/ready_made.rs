@@ -410,3 +410,220 @@ fn paletted_legacy_cursors_still_pass_through() {
     assert_eq!(built.cursors[0].data, cur, "copied through byte for byte");
     assert_eq!(built.cursors[0].sizes, vec![32], "size read from the directory");
 }
+
+// ---------------------------------------------------------------- upscale
+
+/// Build a standalone single-size `.cur` out of one image cropped from a stock
+/// multi-size file, mimicking the low-resolution downloads (32/48px only) that
+/// prompted the `upscale` option.
+fn single_size_cur(source: &Path, size: u32) -> Vec<u8> {
+    let images = ico::decode(&std::fs::read(source).unwrap()).unwrap();
+    let img = images
+        .into_iter()
+        .find(|i| i.size == size)
+        .unwrap_or_else(|| panic!("{} has no {size}px image", source.display()));
+    ico::encode(&[img], ico::TYPE_CURSOR).unwrap()
+}
+
+/// The scenario the option exists for: a ready-made source that only has small
+/// images gets the pack's larger sizes filled in, rather than staying stuck at
+/// its native resolution for Windows to stretch on the fly.
+#[test]
+fn upscale_fills_in_larger_sizes_for_a_low_res_static_source() {
+    let dir = scratch("upscale-static");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("art")).unwrap();
+
+    std::fs::write(dir.join("art/small.cur"), single_size_cur(&stock("aero_arrow.cur"), 32)).unwrap();
+    std::fs::write(
+        dir.join("pack.json"),
+        "{ \"name\": \"Upscale\", \"roles\": { \"Arrow\": { \"source\": \"art/small.cur\", \"upscale\": true } } }",
+    )
+    .unwrap();
+
+    let pack = Pack::load(&dir).unwrap();
+    let built = build::build(&pack, &dir).unwrap();
+    let arrow = &built.cursors[0];
+
+    assert_eq!(
+        arrow.sizes,
+        cursorpack::DEFAULT_SIZES.to_vec(),
+        "upscale should fill in every size the pack asks for"
+    );
+
+    let images = ico::decode(&arrow.data).unwrap();
+    assert_eq!(images.len(), cursorpack::DEFAULT_SIZES.len());
+    for img in &images {
+        assert_eq!(img.rgba.len(), (img.size * img.size * 4) as usize);
+        // Every synthesized size must still have real content, not a blank canvas.
+        let opaque = img.rgba.chunks_exact(4).filter(|p| p[3] > 16).count();
+        assert!(opaque > 0, "{}px is blank after upscaling", img.size);
+    }
+
+    assert!(
+        built.warnings.iter().any(|w| matches!(
+            w,
+            cursorpack::raster::Warning::ReadyMadeUpscaled { native: 32, .. }
+        )),
+        "should report what was synthesized, got {:?}",
+        built.warnings
+    );
+    assert!(
+        !built.warnings.iter().any(|w| matches!(
+            w,
+            cursorpack::raster::Warning::LowResolutionSource { .. }
+        )),
+        "should not also claim it is stuck at low resolution once upscale fixed it"
+    );
+}
+
+/// Without `upscale` the old behaviour is unchanged: pass through untouched and
+/// flag it as low resolution. This is what confirms the option is opt-in.
+#[test]
+fn without_upscale_a_low_res_source_is_still_just_flagged() {
+    let dir = scratch("no-upscale-static");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("art")).unwrap();
+
+    let small = single_size_cur(&stock("aero_arrow.cur"), 32);
+    std::fs::write(dir.join("art/small.cur"), &small).unwrap();
+    std::fs::write(
+        dir.join("pack.json"),
+        "{ \"name\": \"NoUpscale\", \"roles\": { \"Arrow\": { \"source\": \"art/small.cur\" } } }",
+    )
+    .unwrap();
+
+    let pack = Pack::load(&dir).unwrap();
+    let built = build::build(&pack, &dir).unwrap();
+    assert_eq!(built.cursors[0].data, small, "still a byte-for-byte copy");
+    assert_eq!(built.cursors[0].sizes, vec![32]);
+    assert!(built.warnings.iter().any(|w| matches!(
+        w,
+        cursorpack::raster::Warning::LowResolutionSource { largest: 32, .. }
+    )));
+}
+
+/// A size that already existed must keep its own exact pixels and hotspot; only
+/// sizes that did not exist are synthesized.
+#[test]
+fn upscale_leaves_the_original_size_untouched() {
+    let dir = scratch("upscale-preserve");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("art")).unwrap();
+
+    let original = single_size_cur(&stock("aero_arrow.cur"), 32);
+    std::fs::write(dir.join("art/small.cur"), &original).unwrap();
+    std::fs::write(
+        dir.join("pack.json"),
+        "{ \"name\": \"Preserve\", \"roles\": { \"Arrow\": { \"source\": \"art/small.cur\", \"upscale\": true } } }",
+    )
+    .unwrap();
+
+    let pack = Pack::load(&dir).unwrap();
+    let built = build::build(&pack, &dir).unwrap();
+
+    let orig_img = &ico::decode(&original).unwrap()[0];
+    let built_32 = ico::decode(&built.cursors[0].data)
+        .unwrap()
+        .into_iter()
+        .find(|i| i.size == 32)
+        .unwrap();
+
+    assert_eq!(built_32.rgba, orig_img.rgba, "original pixels must survive exactly");
+    assert_eq!((built_32.hot_x, built_32.hot_y), (orig_img.hot_x, orig_img.hot_y));
+}
+
+/// A synthesized size's hotspot must scale proportionally from the native one,
+/// the same way a drawn source's hotspot scales from `base_size`.
+#[test]
+fn upscale_scales_the_hotspot_for_synthesized_sizes() {
+    let dir = scratch("upscale-hotspot");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("art")).unwrap();
+
+    let small = single_size_cur(&stock("aero_arrow.cur"), 32);
+    let native_hot = ico::decode(&small).unwrap()[0].clone();
+    let (nx, ny) = (native_hot.hot_x, native_hot.hot_y);
+
+    std::fs::write(dir.join("art/small.cur"), &small).unwrap();
+    std::fs::write(
+        dir.join("pack.json"),
+        "{ \"name\": \"HotspotScale\", \"roles\": { \"Arrow\": { \"source\": \"art/small.cur\", \"upscale\": true } } }",
+    )
+    .unwrap();
+
+    let pack = Pack::load(&dir).unwrap();
+    let built = build::build(&pack, &dir).unwrap();
+    for img in ico::decode(&built.cursors[0].data).unwrap() {
+        let expect_x = ((nx as f64 * img.size as f64 / 32.0).round() as u32).min(img.size - 1);
+        let expect_y = ((ny as f64 * img.size as f64 / 32.0).round() as u32).min(img.size - 1);
+        assert_eq!(
+            (img.hot_x as u32, img.hot_y as u32),
+            (expect_x, expect_y),
+            "hotspot at {}px",
+            img.size
+        );
+    }
+}
+
+/// An explicit hotspot override still wins over upscaling's own proportional one.
+#[test]
+fn upscale_still_honours_an_explicit_hotspot_override() {
+    let dir = scratch("upscale-override");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("art")).unwrap();
+
+    std::fs::write(dir.join("art/small.cur"), single_size_cur(&stock("aero_arrow.cur"), 32)).unwrap();
+    std::fs::write(
+        dir.join("pack.json"),
+        "{ \"name\": \"OverrideUpscale\", \"roles\": { \"Arrow\": { \"source\": \"art/small.cur\", \"upscale\": true, \"hotspot\": [4, 3] } } }",
+    )
+    .unwrap();
+
+    let pack = Pack::load(&dir).unwrap();
+    let built = build::build(&pack, &dir).unwrap();
+    for img in ico::decode(&built.cursors[0].data).unwrap() {
+        let expect = pack.scaled_hotspot(&pack.roles["Arrow"], img.size);
+        assert_eq!((img.hot_x, img.hot_y), expect, "at {}px", img.size);
+    }
+}
+
+/// Upscaling an animated ready-made source must still respect the Windows
+/// per-frame byte ceiling - the same budget drawn animations are trimmed to.
+#[test]
+fn upscale_on_animated_ready_made_respects_the_frame_budget() {
+    let dir = scratch("upscale-animated");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("art")).unwrap();
+
+    // aero_busy.ani already carries 32/48/64px in every frame; asking to
+    // upscale to the full DEFAULT_SIZES range must be capped by the budget
+    // exactly like a drawn animation is.
+    std::fs::copy(stock("aero_busy.ani"), dir.join("art/busy.ani")).unwrap();
+    std::fs::write(
+        dir.join("pack.json"),
+        "{ \"name\": \"UpscaleAnimated\", \"roles\": { \"Wait\": { \"source\": \"art/busy.ani\", \"upscale\": true } } }",
+    )
+    .unwrap();
+
+    let pack = Pack::load(&dir).unwrap();
+    let built = build::build(&pack, &dir).unwrap();
+    let wait = &built.cursors[0];
+
+    let (expected_kept, expected_dropped) =
+        cursorpack::ani::fit_sizes(&cursorpack::DEFAULT_SIZES.to_vec());
+    assert_eq!(wait.sizes, expected_kept);
+    assert!(!expected_dropped.is_empty(), "the test should exercise an actual cap");
+
+    assert!(
+        cursorpack::ico::frame_bytes(&wait.sizes) <= cursorpack::ani::MAX_FRAME_BYTES,
+        "must not exceed the per-frame ceiling"
+    );
+    assert!(built.warnings.iter().any(|w| matches!(
+        w,
+        cursorpack::raster::Warning::AnimationSizesDropped { .. }
+    )));
+
+    let decoded = ani::decode(&wait.data).unwrap();
+    assert_eq!(decoded.frames.len(), 18, "frame count must be unchanged");
+}

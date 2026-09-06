@@ -23,6 +23,7 @@ enum Action {
     DeletePack(usize),
     ConfirmDelete,
     CancelDelete,
+    FixLowResolution,
     ConfirmQuit { restore: bool },
     CancelQuit,
 }
@@ -33,6 +34,12 @@ enum Tone {
     Warn,
     Bad,
 }
+
+/// Maximum pointers shown per row in the "every pointer in this pack" strip.
+const DETAILS_COLS: usize = 6;
+/// Height budgeted per row there: the chip's own box (see `role_chip`) plus its
+/// two lines of caption text and row spacing.
+const DETAILS_ROW_H: f32 = 68.0 + 2.0 + 11.0 + 11.0 + 6.0;
 
 pub struct App {
     packs: Vec<FoundPack>,
@@ -300,6 +307,70 @@ impl App {
         }
     }
 
+    /// Turn on `upscale` for every role in the selected pack that is currently
+    /// stuck at a low native resolution, then rebuild the preview so the effect
+    /// is visible immediately.
+    ///
+    /// This is the one-click answer to "how do I fix that low-res warning":
+    /// each affected role gets its larger sizes filled in by resampling its
+    /// largest embedded image, instead of leaving Windows to stretch it live.
+    fn fix_low_resolution(&mut self) {
+        let Some(found) = self.selected.and_then(|i| self.packs.get(i)) else {
+            return;
+        };
+        if found.builtin {
+            self.say(
+                "Built-in packs are not meant to be edited. Import a copy to change it.",
+                Tone::Warn,
+            );
+            return;
+        }
+
+        let roles: Vec<String> = self
+            .preview_warnings
+            .iter()
+            .filter_map(|w| match w {
+                cursorpack::raster::Warning::LowResolutionSource { role, .. } => {
+                    Some(role.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        if roles.is_empty() {
+            return;
+        }
+
+        let dir = found.dir.clone();
+        let mut pack = match cursorpack::manifest::Pack::load(&dir) {
+            Ok(p) => p,
+            Err(e) => {
+                self.say(format!("Could not read pack.json: {e}"), Tone::Bad);
+                return;
+            }
+        };
+
+        let mut changed = 0;
+        for role in &roles {
+            if let Some(spec) = pack.roles.get_mut(role) {
+                spec.upscale = true;
+                changed += 1;
+            }
+        }
+        if let Err(e) = pack.save(&dir) {
+            self.say(format!("Could not save pack.json: {e}"), Tone::Bad);
+            return;
+        }
+
+        // Force the preview (and, if this pack is applied, the next apply) to
+        // pick up the change.
+        self.preview_for = None;
+        self.thumbs.remove(&dir);
+        self.say(
+            format!("Upscaling turned on for {changed} pointer(s) in \"{}\".", pack.name),
+            Tone::Ok,
+        );
+    }
+
     fn say(&mut self, msg: impl Into<String>, tone: Tone) {
         self.status = Some((msg.into(), tone));
     }
@@ -382,6 +453,7 @@ impl App {
                     self.delete_pack(i);
                 }
             }
+            Action::FixLowResolution => self.fix_low_resolution(),
             Action::Rescan => self.rescan(),
             Action::OpenPacksFolder => packs::open_folder(&packs::user_packs_dir()),
             Action::ImportFolder => self.import_folder(),
@@ -603,7 +675,7 @@ impl App {
         });
     }
 
-    fn footer(&mut self, ui: &mut egui::Ui, _actions: &mut [Action]) {
+    fn footer(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         egui::Panel::top("status").show(ui, |ui| {
             ui.add_space(4.0);
             if let Some((msg, tone)) = &self.status {
@@ -631,6 +703,34 @@ impl App {
                         .small(),
                 );
             }
+
+            // Low resolution is the one warning with a one-click fix: upscale
+            // the affected roles instead of leaving Windows to stretch them.
+            let can_fix = self
+                .selected
+                .and_then(|i| self.packs.get(i))
+                .is_some_and(|p| !p.builtin)
+                && self.preview_warnings.iter().any(|w| {
+                    matches!(w, cursorpack::raster::Warning::LowResolutionSource { .. })
+                });
+            if can_fix {
+                ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+                    if ui
+                        .small_button("Upscale the low-res pointer(s) in this pack")
+                        .on_hover_text(
+                            "Fills in the larger sizes by resampling the pointer's largest \
+                             embedded image, so it stops relying on Windows to stretch it live. \
+                             Still soft above its native size — upscaling cannot invent detail \
+                             that was never there — but sharper and consistent everywhere.",
+                        )
+                        .clicked()
+                    {
+                        actions.push(Action::FixLowResolution);
+                    }
+                });
+            }
+
             for p in &self.problems {
                 ui.label(RichText::new(format!("• {p}")).color(Color32::from_rgb(240, 120, 120)).small());
             }
@@ -795,7 +895,17 @@ impl App {
             // default so the scroll area takes only the height its tiles need,
             // capped by max_height.
             let has_details = !self.preview.is_empty() || self.preview_error.is_some();
-            let details_h = if has_details { 168.0 } else { 0.0 };
+            let detail_rows = self.preview.len().div_ceil(DETAILS_COLS).max(1);
+            // Reserve enough height for up to two rows without scrolling; a pack
+            // with more rows scrolls within the space instead of pushing the
+            // gallery off screen.
+            let details_h = if !has_details {
+                0.0
+            } else if self.preview_error.is_some() {
+                80.0
+            } else {
+                40.0 + detail_rows.min(2) as f32 * DETAILS_ROW_H + 10.0
+            };
             let gallery_h = (ui.available_height() - details_h).max(150.0);
 
             egui::ScrollArea::vertical()
@@ -868,16 +978,19 @@ impl App {
             let secs = self.started.elapsed().as_secs_f64();
             let ppp = ui.ctx().pixels_per_point();
 
-            egui::ScrollArea::horizontal()
+            egui::ScrollArea::vertical()
                 .id_salt("details-scroll")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    ui.horizontal_top(|ui| {
-                        for role in &self.preview {
-                            role_chip(ui, role, secs, ppp);
-                            ui.add_space(12.0);
-                        }
-                    });
+                    for row in self.preview.chunks(DETAILS_COLS) {
+                        ui.horizontal_top(|ui| {
+                            for role in row {
+                                role_chip(ui, role, secs, ppp);
+                                ui.add_space(12.0);
+                            }
+                        });
+                        ui.add_space(6.0);
+                    }
                 });
         }
     }
