@@ -1,0 +1,14 @@
+[package]
+name = "cursorpack"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Cursor pack manifest, rasterization, and .cur/.ani/Xcursor encoding"
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+image.workspace = true
+resvg.workspace = true
+log.workspace = true

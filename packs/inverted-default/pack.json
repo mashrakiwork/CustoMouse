@@ -1,0 +1,104 @@
+{
+  "format": 1,
+  "name": "Inverted Default",
+  "author": "generated from Windows",
+  "version": "1.0.0",
+  "description": "The Windows default pointers with their colours inverted: black where they were white, white where they were black. Static pointers are re-rendered from the Windows SVG sources at every size, so they are sharper than the stock bitmaps.",
+  "base_size": 32,
+  "sizes": [
+    32,
+    48,
+    64,
+    96,
+    128,
+    192,
+    256
+  ],
+  "roles": {
+    "AppStarting": {
+      "source": "art\\AppStarting.ani",
+      "fps": 20.0,
+      "loop": true
+    },
+    "Arrow": {
+      "source": "art\\Arrow.cur",
+      "fps": 20.0,
+      "loop": true
+    },
+    "Crosshair": {
+      "source": "art\\Crosshair.cur",
+      "fps": 20.0,
+      "loop": true
+    },
+    "Hand": {
+      "source": "art\\Hand.cur",
+      "fps": 20.0,
+      "loop": true
+    },
+    "Help": {
+      "source": "art\\Help.cur",
+      "fps": 20.0,
+      "loop": true
+    },
+    "IBeam": {
+      "source": "art\\IBeam.cur",
+      "fps": 20.0,
+      "loop": true
+    },
+    "NWPen": {
+      "source": "art\\NWPen.cur",
+      "fps": 20.0,
+      "loop": true
+    },
+    "No": {
+      "source": "art\\No.cur",
+      "fps": 20.0,
+      "loop": true
+    },
+    "Person": {
+      "source": "art\\Person.cur",
+      "fps": 20.0,
+      "loop": true
+    },
+    "Pin": {
+      "source": "art\\Pin.cur",
+      "fps": 20.0,
+      "loop": true
+    },
+    "SizeAll": {
+      "source": "art\\SizeAll.cur",
+      "fps": 20.0,
+      "loop": true
+    },
+    "SizeNESW": {
+      "source": "art\\SizeNESW.cur",
+      "fps": 20.0,
+      "loop": true
+    },
+    "SizeNS": {
+      "source": "art\\SizeNS.cur",
+      "fps": 20.0,
+      "loop": true
+    },
+    "SizeNWSE": {
+      "source": "art\\SizeNWSE.cur",
+      "fps": 20.0,
+      "loop": true
+    },
+    "SizeWE": {
+      "source": "art\\SizeWE.cur",
+      "fps": 20.0,
+      "loop": true
+    },
+    "UpArrow": {
+      "source": "art\\UpArrow.cur",
+      "fps": 20.0,
+      "loop": true
+    },
+    "Wait": {
+      "source": "art\\Wait.ani",
+      "fps": 20.0,
+      "loop": true
+    }
+  }
+}

@@ -1,0 +1,22 @@
+[package]
+name = "custo-mouse"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cursorpack = { path = "../crates/cursorpack" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+image.workspace = true
+log.workspace = true
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+egui = "0.36"
+env_logger = "0.11"
+rfd = "0.15"
+
+[target.'cfg(windows)'.dependencies]
+winapply = { path = "../crates/winapply" }
+tray-icon = "0.24"
+auto-launch = "0.6"

@@ -1,0 +1,20 @@
+# Cargo build output.
+/target/
+
+# Packaged build: the release exe plus a copy of packs/. Reproduce with
+#   cargo build --release -p custo-mouse
+# and copy the exe and packs/ next to each other.
+/dist/
+
+# Imported cursor packs live in %LOCALAPPDATA%\CustoMouse\packs, never here, but
+# guard against a downloaded set being dropped into the tree by accident.
+/packs/*/
+!/packs/inverted-default/
+
+# OS and editor cruft.
+Thumbs.db
+desktop.ini
+.DS_Store
+*.swp
+.vscode/
+.idea/
