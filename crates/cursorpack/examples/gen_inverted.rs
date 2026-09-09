@@ -350,5 +350,28 @@ fn write_icon(src: &Path, out: &Path) {
         std::fs::create_dir_all(dir).ok();
     }
     canvas.save(out).expect("write icon");
+
+    // A real Windows .ico too, embedded into the exe's resources at build time
+    // (see app/build.rs) so Explorer, the taskbar, and the Start menu show the
+    // app's own icon for the file itself, not just for its window at runtime.
+    // Resampled down from this same 256px canvas rather than redrawn at each
+    // size, so every size matches what the running app already shows.
+    const ICO_SIZES: [u32; 7] = [16, 24, 32, 48, 64, 128, 256];
+    let canvas_raw = canvas.into_raw();
+    let images: Vec<ico::Image> = ICO_SIZES
+        .iter()
+        .map(|&size| {
+            let rgba = if size == N {
+                canvas_raw.clone()
+            } else {
+                raster::resize_rgba(&canvas_raw, N, size).expect("resize icon")
+            };
+            ico::Image::new(size, rgba, 0, 0).expect("build icon image")
+        })
+        .collect();
+    let ico_bytes = ico::encode(&images, ico::TYPE_ICON).expect("encode .ico");
+    let ico_out = out.with_extension("ico");
+    std::fs::write(&ico_out, ico_bytes).expect("write .ico");
+    println!("icon -> {}", ico_out.display());
     println!("icon -> {}", out.display());
 }
