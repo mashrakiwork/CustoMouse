@@ -49,7 +49,9 @@ Sources can be static (`.cur`, `.png`, `.svg`) or animated (`.ani`, `.gif`, spri
 
 ## Building
 
-Requires a recent stable Rust toolchain (edition 2021, Rust 1.82+) and Windows for the registry-apply and tray functionality.
+Requires a recent stable Rust toolchain (edition 2021, Rust 1.82+) with the MSVC target (install from [rustup.rs](https://rustup.rs), which needs the Visual Studio C++ build tools for the linker), and Windows for the registry-apply and tray functionality. Everything else, including the vector-trace upscaling library, is plain Rust code fetched from crates.io during the build — there is nothing extra to download by hand.
+
+Run [setup.bat](setup.bat) to build a release exe and stage it in `dist/` next to a copy of the bundled packs, or do it yourself:
 
 ```bash
 cargo build --release
