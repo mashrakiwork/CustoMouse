@@ -23,7 +23,7 @@ enum Action {
     DeletePack(usize),
     ConfirmDelete,
     CancelDelete,
-    FixLowResolution,
+    FixLowResolution(cursorpack::manifest::UpscaleMode),
     ConfirmQuit { restore: bool },
     CancelQuit,
 }
@@ -307,14 +307,15 @@ impl App {
         }
     }
 
-    /// Turn on `upscale` for every role in the selected pack that is currently
-    /// stuck at a low native resolution, then rebuild the preview so the effect
-    /// is visible immediately.
+    /// Turn on `upscale` (in the given mode) for every role in the selected
+    /// pack that is currently stuck at a low native resolution, then rebuild
+    /// the preview so the effect is visible immediately.
     ///
     /// This is the one-click answer to "how do I fix that low-res warning":
-    /// each affected role gets its larger sizes filled in by resampling its
-    /// largest embedded image, instead of leaving Windows to stretch it live.
-    fn fix_low_resolution(&mut self) {
+    /// each affected role gets its larger sizes filled in — either resampled
+    /// from its largest embedded image, or traced into vector shapes first —
+    /// instead of leaving Windows to stretch it live.
+    fn fix_low_resolution(&mut self, mode: cursorpack::manifest::UpscaleMode) {
         let Some(found) = self.selected.and_then(|i| self.packs.get(i)) else {
             return;
         };
@@ -352,7 +353,7 @@ impl App {
         let mut changed = 0;
         for role in &roles {
             if let Some(spec) = pack.roles.get_mut(role) {
-                spec.upscale = true;
+                spec.upscale = mode;
                 changed += 1;
             }
         }
@@ -365,8 +366,15 @@ impl App {
         // pick up the change.
         self.preview_for = None;
         self.thumbs.remove(&dir);
+        let via = match mode {
+            cursorpack::manifest::UpscaleMode::Vector => "vector tracing, experimental",
+            _ => "resampling",
+        };
         self.say(
-            format!("Upscaling turned on for {changed} pointer(s) in \"{}\".", pack.name),
+            format!(
+                "Upscaling ({via}) turned on for {changed} pointer(s) in \"{}\".",
+                pack.name
+            ),
             Tone::Ok,
         );
     }
@@ -453,7 +461,7 @@ impl App {
                     self.delete_pack(i);
                 }
             }
-            Action::FixLowResolution => self.fix_low_resolution(),
+            Action::FixLowResolution(mode) => self.fix_low_resolution(mode),
             Action::Rescan => self.rescan(),
             Action::OpenPacksFolder => packs::open_folder(&packs::user_packs_dir()),
             Action::ImportFolder => self.import_folder(),
@@ -716,17 +724,41 @@ impl App {
             if can_fix {
                 ui.horizontal(|ui| {
                     ui.add_space(4.0);
+                    ui.label(
+                        RichText::new("Fix the low-res pointer(s) in this pack:")
+                            .small()
+                            .weak(),
+                    );
                     if ui
-                        .small_button("Upscale the low-res pointer(s) in this pack")
+                        .small_button("Resample")
                         .on_hover_text(
                             "Fills in the larger sizes by resampling the pointer's largest \
-                             embedded image, so it stops relying on Windows to stretch it live. \
-                             Still soft above its native size — upscaling cannot invent detail \
-                             that was never there — but sharper and consistent everywhere.",
+                             embedded image with a high-quality filter. Fast and predictable, \
+                             but still soft above its native size — resampling cannot invent \
+                             detail that was never there.",
                         )
                         .clicked()
                     {
-                        actions.push(Action::FixLowResolution);
+                        actions.push(Action::FixLowResolution(
+                            cursorpack::manifest::UpscaleMode::Raster,
+                        ));
+                    }
+                    if ui
+                        .small_button("Vector trace (experimental)")
+                        .on_hover_text(
+                            "Experimental, not generally recommended. Traces the pointer's \
+                             largest embedded image into vector shapes, then renders each \
+                             larger size from that trace, so edges stay crisp instead of \
+                             getting soft — but the trace often flattens shading and fine \
+                             detail into blocky regions, so results are inconsistent and can \
+                             look worse than a plain resample. Works best, if at all, on \
+                             simple, flat-color art. Try Resample first.",
+                        )
+                        .clicked()
+                    {
+                        actions.push(Action::FixLowResolution(
+                            cursorpack::manifest::UpscaleMode::Vector,
+                        ));
                     }
                 });
             }

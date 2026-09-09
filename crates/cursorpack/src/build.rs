@@ -2,7 +2,7 @@
 
 use crate::ani::{self, Anim};
 use crate::ico::{self, Image};
-use crate::manifest::{Pack, RoleSpec};
+use crate::manifest::{Pack, RoleSpec, UpscaleMode};
 use crate::raster::{Art, Warning};
 use crate::{Error, Result};
 use std::path::Path;
@@ -185,7 +185,8 @@ fn build_ready_made(
 
     // A plain pass-through needs no decoding at all. Overriding the hotspot or
     // synthesizing larger sizes both need real pixels to work with.
-    let needs_decode = spec.hotspot.is_some() || spec.upscale;
+    let upscaling = spec.upscale != UpscaleMode::Off;
+    let needs_decode = spec.hotspot.is_some() || upscaling;
 
     let (out_data, final_sizes) = if !needs_decode {
         (data, sizes.clone())
@@ -197,13 +198,13 @@ fn build_ready_made(
         // `upscale` the original sizes are kept exactly as they came, since a
         // real ready-made file was already something Windows could load.
         let mut wanted = sizes.clone();
-        if spec.upscale {
+        if upscaling {
             wanted.extend(pack.sizes.iter().copied());
             wanted.sort_unstable();
             wanted.dedup();
         }
         let (kept, dropped) = ani::fit_sizes(&wanted);
-        if spec.upscale && !dropped.is_empty() {
+        if upscaling && !dropped.is_empty() {
             warnings.push(Warning::AnimationSizesDropped {
                 role: role.to_string(),
                 kept: kept.clone(),
@@ -220,7 +221,7 @@ fn build_ready_made(
     } else {
         let existing = ico::decode(&data)?;
         let mut wanted = sizes.clone();
-        if spec.upscale {
+        if upscaling {
             wanted.extend(pack.sizes.iter().copied());
             wanted.sort_unstable();
             wanted.dedup();
@@ -237,11 +238,12 @@ fn build_ready_made(
         .copied()
         .filter(|s| !sizes.contains(s))
         .collect();
-    if spec.upscale && !added.is_empty() {
+    if upscaling && !added.is_empty() {
         warnings.push(Warning::ReadyMadeUpscaled {
             role: role.to_string(),
             native,
             added,
+            mode: spec.upscale,
         });
     } else if native < 64 {
         warnings.push(Warning::LowResolutionSource {
@@ -310,12 +312,24 @@ fn build_sized_frame(
     let largest_rgba = by_size[&largest_size].rgba.clone();
     let largest_hot = (by_size[&largest_size].hot_x, by_size[&largest_size].hot_y);
 
+    // Vector mode traces the largest image once and renders every missing
+    // size from that single trace, rather than resampling per size.
+    let needs_synthesis = target_sizes.iter().any(|s| !by_size.contains_key(s));
+    let traced = if spec.upscale == UpscaleMode::Vector && needs_synthesis {
+        Some(crate::raster::trace_to_vector(&largest_rgba, largest_size)?)
+    } else {
+        None
+    };
+
     let mut out = Vec::with_capacity(target_sizes.len());
     for &size in target_sizes {
         let img = match by_size.remove(&size) {
             Some(existing_img) => existing_img,
             None => {
-                let rgba = crate::raster::resize_rgba(&largest_rgba, largest_size, size)?;
+                let rgba = match &traced {
+                    Some(tree) => crate::raster::render_vector(tree, size)?,
+                    None => crate::raster::resize_rgba(&largest_rgba, largest_size, size)?,
+                };
                 let (hx, hy) = scale_hotspot(largest_size, largest_hot, size);
                 Image::new(size, rgba, hx, hy)?
             }

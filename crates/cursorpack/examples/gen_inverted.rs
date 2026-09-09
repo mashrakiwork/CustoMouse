@@ -310,8 +310,14 @@ fn write_icon(src: &Path, out: &Path) {
     );
     let big = image::imageops::resize(&cropped, cw, ch, image::imageops::FilterType::Lanczos3);
 
+    // Center the (non-square) cursor within the canvas on both axes. Only one
+    // of cw/ch equals `avail` — the other is smaller, since the aspect ratio
+    // is preserved — so anchoring at (margin, margin) on both axes leaves the
+    // shorter axis flush against one edge instead of centered.
+    let ox = margin as i64 + (avail as i64 - cw as i64) / 2;
+    let oy = margin as i64 + (avail as i64 - ch as i64) / 2;
     let mut canvas = image::RgbaImage::new(N, N);
-    image::imageops::overlay(&mut canvas, &big, margin as i64, margin as i64);
+    image::imageops::overlay(&mut canvas, &big, ox, oy);
 
     // Plus badge, overlapping the bottom-right corner of the cursor itself (not
     // floating off in empty canvas space) — a dark keyline behind a white fill,
@@ -319,8 +325,8 @@ fn write_icon(src: &Path, out: &Path) {
     // background behind it.
     let outer_half = N as f32 * 0.20;
     let fit = |v: f32| v.clamp(outer_half + 2.0, N as f32 - outer_half - 2.0);
-    let cx = fit(margin as f32 + cw as f32 * 0.92);
-    let cy = fit(margin as f32 + ch as f32 * 0.92);
+    let cx = fit(ox as f32 + cw as f32 * 0.92);
+    let cy = fit(oy as f32 + ch as f32 * 0.92);
     let cross = |x: u32, y: u32, half: f32, thick: f32| {
         let (dx, dy) = ((x as f32 - cx).abs(), (y as f32 - cy).abs());
         (dx <= thick && dy <= half) || (dy <= thick && dx <= half)

@@ -4,6 +4,8 @@ A Windows tray app for installing, switching, and authoring themed cursor packs,
 
 CustoMouse is a **pack manager and build pipeline**, not a drawing tool. You supply artwork (SVG, PNG, GIF, or a sprite sheet), and it rasterizes, encodes, and applies correct `.cur`/`.ani` files for every role in the Windows pointer scheme.
 
+![CustoMouse with the bundled Inverted Default pack applied — the title bar icon and the pointer next to "Active: Inverted Default" show the black-on-white inverted cursor now in use](docs/screenshot.png)
+
 ## Why
 
 Most third-party cursor packs look blurry because they ship a single 32px bitmap and let Windows stretch it for every other size. CustoMouse renders each size directly from the source art, vector when available, so pointers stay crisp from 32px up through the large accessibility sizes.
@@ -12,7 +14,7 @@ Most third-party cursor packs look blurry because they ship a single 32px bitmap
 
 - **Multi-size `.cur`/`.ani` encoding**: every role embeds all standard sizes (32/48/64/96/128 and up) in one file, verified byte-for-byte against Windows' own stock cursors.
 - **Animated cursors**: `.ani` sources with per-frame timing, respecting Windows' per-frame byte limits.
-- **Ready-made upscaling**: for packs whose source art only has small bitmaps, a per-role `upscale` flag synthesizes the missing larger sizes with a premultiplied Lanczos resample, sharper than Windows' on-the-fly stretch.
+- **Ready-made upscaling**: for packs whose source art only has small bitmaps, a per-role `upscale` mode synthesizes the missing larger sizes with a premultiplied Lanczos resample, sharper than Windows' on-the-fly stretch. An experimental vector-trace mode is also available, though results are inconsistent and a plain resample is usually the better choice.
 - **Safe apply/restore**: writes to `HKCU\Control Panel\Cursors`, calls `SystemParametersInfo` to make Windows pick up the change immediately, and can restore the previous scheme (including offline, via a generated restore script).
 - **Tray application**: gallery of installed packs, per-pointer previews, import, delete, and autostart, built with `egui`.
 

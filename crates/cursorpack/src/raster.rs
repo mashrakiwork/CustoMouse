@@ -44,13 +44,14 @@ pub enum Warning {
         role: String,
         largest: u32,
     },
-    /// A ready-made source's larger sizes were synthesized by upscaling its
-    /// largest embedded image (role's `upscale: true`), rather than left for
-    /// Windows to stretch on the fly.
+    /// A ready-made source's larger sizes were synthesized from its largest
+    /// embedded image (role's `upscale` mode), rather than left for Windows
+    /// to stretch on the fly.
     ReadyMadeUpscaled {
         role: String,
         native: u32,
         added: Vec<u32>,
+        mode: crate::manifest::UpscaleMode,
     },
     /// Sizes were left out of an animated cursor to stay under the Windows
     /// per-frame limit. See [`crate::ani::MAX_FRAME_BYTES`].
@@ -92,12 +93,20 @@ impl std::fmt::Display for Warning {
                  whatever Windows does on the fly. Only redrawing it from vector or \
                  high-resolution art gets a genuinely sharp result."
             ),
-            Warning::ReadyMadeUpscaled { role, native, added } => write!(
-                f,
-                "{role} is a ready-made cursor only {native}px native; {added:?} px were \
-                 synthesized by upscaling it. They will look softer than a size drawn from \
-                 real art at that resolution."
-            ),
+            Warning::ReadyMadeUpscaled { role, native, added, mode } => {
+                let how = match mode {
+                    crate::manifest::UpscaleMode::Vector => {
+                        "by tracing it into vector shapes and rendering each size from that trace"
+                    }
+                    _ => "by resampling it",
+                };
+                write!(
+                    f,
+                    "{role} is a ready-made cursor only {native}px native; {added:?} px were \
+                     synthesized {how}. They will look different from a size drawn from real \
+                     art at that resolution."
+                )
+            }
             Warning::AnimationSizesDropped {
                 role,
                 kept,
@@ -244,6 +253,38 @@ fn load_svg(path: &Path) -> Result<Art> {
         msg: e.to_string(),
     })?;
     Ok(Art::Vector(Box::new(tree)))
+}
+
+/// Trace a square straight-alpha RGBA buffer into vector shapes, for the
+/// `UpscaleMode::Vector` path: a ready-made source's larger sizes are then
+/// rendered from this trace instead of resampled, so their edges stay crisp
+/// no matter how far past the source's native size they go.
+///
+/// Speckle filtering and spline-fit corners (vtracer's defaults) are the
+/// "cleanup" pass — they discard stray anti-aliasing noise from the source
+/// bitmap and smooth pixel-staircase edges into curves, rather than tracing
+/// every jagged pixel boundary literally.
+pub fn trace_to_vector(rgba: &[u8], size: u32) -> Result<resvg::usvg::Tree> {
+    let img = vtracer::ColorImage {
+        pixels: rgba.to_vec(),
+        width: size as usize,
+        height: size as usize,
+    };
+    let svg = vtracer::convert(img, vtracer::Config::default())
+        .map_err(|e| Error::Other(format!("vectorizing failed: {e}")))?;
+    let data = svg.to_string();
+    resvg::usvg::Tree::from_data(data.as_bytes(), &resvg::usvg::Options::default()).map_err(|e| {
+        Error::Svg {
+            path: PathBuf::from("<traced>"),
+            msg: e.to_string(),
+        }
+    })
+}
+
+/// Render an already-loaded vector tree to a square RGBA buffer. Exposed for
+/// [`crate::build`], which renders one trace at several sizes.
+pub fn render_vector(tree: &resvg::usvg::Tree, size: u32) -> Result<Vec<u8>> {
+    render_svg(tree, size)
 }
 
 fn render_svg(tree: &resvg::usvg::Tree, size: u32) -> Result<Vec<u8>> {

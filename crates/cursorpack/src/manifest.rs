@@ -181,19 +181,17 @@ pub struct RoleSpec {
     pub inherit: Option<String>,
 
     /// For a ready-made `.cur`/`.ani` source that only carries small images:
-    /// synthesize the pack's larger sizes by upscaling the largest embedded
-    /// image, instead of leaving Windows to stretch it at display time.
+    /// synthesize the pack's larger sizes instead of leaving Windows to
+    /// stretch it at display time.
     ///
     /// Off by default, so a plain import stays a byte-for-byte copy of the
-    /// source file. The result is still soft above the source's native size —
-    /// upscaling cannot invent detail that was never there — but it resamples
-    /// once with the same high-quality filter the rest of the pipeline uses,
-    /// rather than whatever Windows does on the fly, and it is consistent
-    /// across every monitor and pointer-size setting rather than depending on
-    /// each one separately. Ignored for drawn (SVG/PNG/GIF) sources, which
-    /// already render at every requested size.
-    #[serde(default)]
-    pub upscale: bool,
+    /// source file. Ignored for drawn (SVG/PNG/GIF) sources, which already
+    /// render at every requested size.
+    ///
+    /// Accepts the legacy `true`/`false` from older packs: `true` reads as
+    /// [`UpscaleMode::Raster`].
+    #[serde(default, deserialize_with = "deserialize_upscale_mode")]
+    pub upscale: UpscaleMode,
 }
 
 impl Default for RoleSpec {
@@ -205,9 +203,46 @@ impl Default for RoleSpec {
             looping: true,
             grid: None,
             inherit: None,
-            upscale: false,
+            upscale: UpscaleMode::Off,
         }
     }
+}
+
+/// How a ready-made source's missing larger sizes get filled in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UpscaleMode {
+    /// Leave the source at its native size; Windows stretches it on the fly.
+    #[default]
+    Off,
+    /// Resample the largest embedded image with the pipeline's Lanczos
+    /// filter. Fast and predictable, but stays soft above the source's
+    /// native size — resampling cannot invent detail that was never there.
+    Raster,
+    /// Experimental, not generally recommended. Traces the largest embedded
+    /// image into vector shapes, then renders each missing size from that
+    /// trace. Edges stay crisp at any size instead of softening, but the
+    /// trace often flattens shading and fine detail into blocky regions —
+    /// results are inconsistent and can look worse than [`Raster`](Self::Raster).
+    Vector,
+}
+
+/// Accepts either the legacy bare `true`/`false` or the current mode string.
+fn deserialize_upscale_mode<'de, D>(d: D) -> std::result::Result<UpscaleMode, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Legacy(bool),
+        Mode(UpscaleMode),
+    }
+    Ok(match Raw::deserialize(d)? {
+        Raw::Legacy(true) => UpscaleMode::Raster,
+        Raw::Legacy(false) => UpscaleMode::Off,
+        Raw::Mode(m) => m,
+    })
 }
 
 impl RoleSpec {
@@ -448,6 +483,29 @@ mod tests {
         assert_eq!(back.name, p.name);
         assert_eq!(back.roles["Arrow"].hotspot, Some([3, 2]));
         assert_eq!(back.sizes, DEFAULT_SIZES);
+    }
+
+    /// Older packs on disk still say `"upscale": true`/`false`. Those must
+    /// keep loading exactly as they did before `UpscaleMode` existed.
+    #[test]
+    fn legacy_bool_upscale_still_loads() {
+        let json = r#"{"name":"x","roles":{"Arrow":{"source":"a.cur","upscale":true}}}"#;
+        let p: Pack = serde_json::from_str(json).unwrap();
+        assert_eq!(p.roles["Arrow"].upscale, UpscaleMode::Raster);
+
+        let json = r#"{"name":"x","roles":{"Arrow":{"source":"a.cur","upscale":false}}}"#;
+        let p: Pack = serde_json::from_str(json).unwrap();
+        assert_eq!(p.roles["Arrow"].upscale, UpscaleMode::Off);
+    }
+
+    #[test]
+    fn vector_upscale_mode_round_trips() {
+        let json = r#"{"name":"x","roles":{"Arrow":{"source":"a.cur","upscale":"vector"}}}"#;
+        let p: Pack = serde_json::from_str(json).unwrap();
+        assert_eq!(p.roles["Arrow"].upscale, UpscaleMode::Vector);
+
+        let back: Pack = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back.roles["Arrow"].upscale, UpscaleMode::Vector);
     }
 
     /// Typos in pack.json should be reported, not silently ignored.

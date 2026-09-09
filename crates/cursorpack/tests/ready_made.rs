@@ -477,6 +477,54 @@ fn upscale_fills_in_larger_sizes_for_a_low_res_static_source() {
     );
 }
 
+/// The vector-trace alternative to plain resampling: same scenario, but the
+/// larger sizes come from tracing the source into vector shapes and
+/// rendering each size from that, rather than a Lanczos resample.
+#[test]
+fn upscale_vector_traces_larger_sizes_for_a_low_res_static_source() {
+    let dir = scratch("upscale-vector-static");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("art")).unwrap();
+
+    std::fs::write(dir.join("art/small.cur"), single_size_cur(&stock("aero_arrow.cur"), 32)).unwrap();
+    std::fs::write(
+        dir.join("pack.json"),
+        "{ \"name\": \"UpscaleVector\", \"roles\": { \"Arrow\": { \"source\": \"art/small.cur\", \"upscale\": \"vector\" } } }",
+    )
+    .unwrap();
+
+    let pack = Pack::load(&dir).unwrap();
+    let built = build::build(&pack, &dir).unwrap();
+    let arrow = &built.cursors[0];
+
+    assert_eq!(
+        arrow.sizes,
+        cursorpack::DEFAULT_SIZES.to_vec(),
+        "vector upscale should fill in every size the pack asks for"
+    );
+
+    let images = ico::decode(&arrow.data).unwrap();
+    assert_eq!(images.len(), cursorpack::DEFAULT_SIZES.len());
+    for img in &images {
+        assert_eq!(img.rgba.len(), (img.size * img.size * 4) as usize);
+        let opaque = img.rgba.chunks_exact(4).filter(|p| p[3] > 16).count();
+        assert!(opaque > 0, "{}px is blank after vector upscaling", img.size);
+    }
+
+    assert!(
+        built.warnings.iter().any(|w| matches!(
+            w,
+            cursorpack::raster::Warning::ReadyMadeUpscaled {
+                native: 32,
+                mode: cursorpack::manifest::UpscaleMode::Vector,
+                ..
+            }
+        )),
+        "should report the vector mode that was used, got {:?}",
+        built.warnings
+    );
+}
+
 /// Without `upscale` the old behaviour is unchanged: pass through untouched and
 /// flag it as low resolution. This is what confirms the option is opt-in.
 #[test]
